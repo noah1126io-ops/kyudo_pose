@@ -48,6 +48,40 @@ def render_summary(metrics_df):
     st.dataframe(pd.DataFrame([summary]), use_container_width=True)
 
 
+def render_rule_based_evaluation(evaluation_summary):
+    st.subheader("ルールベース評価")
+
+    overview = pd.DataFrame(
+        [
+            {
+                "総合点": evaluation_summary["overall_score"],
+                "評価": evaluation_summary["overall_grade"],
+                "主問題": evaluation_summary["primary_issue"],
+                "副問題": evaluation_summary["secondary_issue"],
+            }
+        ]
+    )
+    st.dataframe(overview, use_container_width=True)
+
+    st.write(evaluation_summary["auto_comment"])
+
+    component_scores = pd.DataFrame(
+        [
+            {
+                "肩線バランス": evaluation_summary["component_scores"]["shoulder_balance_score"],
+                "胴造り": evaluation_summary["component_scores"]["torso_posture_score"],
+                "肘の均衡": evaluation_summary["component_scores"]["elbow_balance_score"],
+                "手首高さ": evaluation_summary["component_scores"]["wrist_balance_score"],
+                "静止性": evaluation_summary["component_scores"]["stillness_score"],
+            }
+        ]
+    )
+    st.dataframe(component_scores, use_container_width=True)
+
+    if evaluation_summary["issue_tags"]:
+        st.caption("問題タグ: " + ", ".join(evaluation_summary["issue_tags"]))
+
+
 def main():
     st.set_page_config(page_title="Kyudo Pose Analyzer", layout="wide")
 
@@ -120,9 +154,10 @@ def main():
         return
 
     metrics_df = analysis_result["metrics_df"]
+    evaluation_summary = analysis_result["evaluation_summary"]
 
-    st.success("Analysis completed.")
-    st.subheader("Output Video")
+    st.success("分析が完了しました。")
+    st.subheader("出力動画")
     st.video(read_bytes(pose_result["overlay_video"]), format="video/mp4")
     if pose_result.get("video_codec") == "mp4v":
         st.warning(
@@ -130,11 +165,12 @@ def main():
         )
 
     render_summary(metrics_df)
+    render_rule_based_evaluation(evaluation_summary)
 
-    st.subheader("Metrics Table")
+    st.subheader("時系列指標テーブル")
     st.dataframe(metrics_df, use_container_width=True)
 
-    st.subheader("Plots")
+    st.subheader("グラフ")
     plot_files = [
         "combined_metrics.png",
         "shoulder_height_diff_px.png",
@@ -147,8 +183,8 @@ def main():
         if plot_path.exists():
             st.image(str(plot_path), caption=plot_name, use_container_width=True)
 
-    st.subheader("Downloads")
-    col1, col2, col3, col4 = st.columns(4)
+    st.subheader("ダウンロード")
+    col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
         st.download_button(
             "Download pose_overlay.mp4",
@@ -176,6 +212,13 @@ def main():
             data=read_bytes(analysis_result["metrics_path"]),
             file_name="metrics.csv",
             mime="text/csv",
+        )
+    with col5:
+        st.download_button(
+            "Download evaluation_summary.json",
+            data=read_bytes(analysis_result["evaluation_path"]),
+            file_name="evaluation_summary.json",
+            mime="application/json",
         )
 
     st.caption(f"Saved run directory: {run_dir}")

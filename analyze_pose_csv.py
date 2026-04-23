@@ -1,4 +1,5 @@
 import argparse
+import json
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -107,8 +108,14 @@ def analyze_keypoints_df(df, score_thr=0.3):
                 "shoulder_height_diff_px": shoulder_height_diff,
                 "left_elbow_angle_deg": left_elbow_angle,
                 "right_elbow_angle_deg": right_elbow_angle,
+                "elbow_angle_diff_deg": np.nan
+                if np.isnan(left_elbow_angle) or np.isnan(right_elbow_angle)
+                else abs(left_elbow_angle - right_elbow_angle),
                 "left_wrist_y_px": np.nan if left_wrist is None else float(left_wrist[1]),
                 "right_wrist_y_px": np.nan if right_wrist is None else float(right_wrist[1]),
+                "wrist_height_diff_px": np.nan
+                if left_wrist is None or right_wrist is None
+                else float(left_wrist[1] - right_wrist[1]),
                 "torso_tilt_deg": torso_tilt_deg,
             }
         )
@@ -192,6 +199,192 @@ def plot_metrics(metrics_df, plots_dir):
     save_plot(fig5, plots_dir / "combined_metrics.png")
 
 
+def score_from_abs_mean(value, thresholds, scores):
+    if pd.isna(value):
+        return np.nan
+    abs_value = abs(float(value))
+    if abs_value <= thresholds[0]:
+        return scores[0]
+    if abs_value <= thresholds[1]:
+        return scores[1]
+    if abs_value <= thresholds[2]:
+        return scores[2]
+    return scores[3]
+
+
+def score_from_std(value, thresholds, scores):
+    if pd.isna(value):
+        return np.nan
+    std_value = float(value)
+    if std_value <= thresholds[0]:
+        return scores[0]
+    if std_value <= thresholds[1]:
+        return scores[1]
+    if std_value <= thresholds[2]:
+        return scores[2]
+    return scores[3]
+
+
+def grade_from_score(score):
+    if score >= 90:
+        return "A"
+    if score >= 75:
+        return "B"
+    if score >= 60:
+        return "C"
+    if score >= 40:
+        return "D"
+    return "E"
+
+
+def build_auto_comment(primary_issue, secondary_issue, component_scores):
+    messages = {
+        "shoulder_unlevel": "左右の肩の高さ差が大きく、胴造りの安定に課題があります。",
+        "torso_lean": "胴体の傾きが大きく、縦線の安定性に課題があります。",
+        "elbow_line_bad": "左右の肘の収まりに差があり、引分けの均衡に課題があります。",
+        "wrist_height_unstable": "左右の手首高さの差が大きく、上肢の収まりに課題があります。",
+        "kai_unstable": "会の局面で揺れが大きく、静止性が十分ではありません。",
+    }
+
+    parts = []
+    if primary_issue in messages:
+        parts.append(messages[primary_issue])
+    if secondary_issue in messages and secondary_issue != primary_issue:
+        parts.append(messages[secondary_issue])
+
+    best_name = max(component_scores, key=component_scores.get)
+    strengths = {
+        "shoulder_balance_score": "肩線の水平は比較的保たれています。",
+        "torso_posture_score": "胴体の縦線は比較的安定しています。",
+        "elbow_balance_score": "左右の肘角度は比較的揃っています。",
+        "wrist_balance_score": "左右の手首高さは比較的揃っています。",
+        "stillness_score": "全体の静止性は比較的良好です。",
+    }
+    if best_name in strengths and component_scores[best_name] >= 75:
+        parts.append(strengths[best_name])
+
+    if not parts:
+        parts.append("大きな崩れは少なく、全体として安定した射型です。")
+
+    return " ".join(parts)
+
+
+def evaluate_rule_based(metrics_df):
+    summary = {
+        "mean_abs_shoulder_height_diff_px": float(
+            metrics_df["shoulder_height_diff_px"].abs().mean(skipna=True)
+        ),
+        "mean_abs_torso_tilt_deg": float(
+            metrics_df["torso_tilt_deg"].abs().mean(skipna=True)
+        ),
+        "mean_abs_elbow_angle_diff_deg": float(
+            metrics_df["elbow_angle_diff_deg"].abs().mean(skipna=True)
+        ),
+        "mean_abs_wrist_height_diff_px": float(
+            metrics_df["wrist_height_diff_px"].abs().mean(skipna=True)
+        ),
+        "shoulder_height_std_px": float(
+            metrics_df["shoulder_height_diff_px"].std(skipna=True)
+        ),
+        "torso_tilt_std_deg": float(metrics_df["torso_tilt_deg"].std(skipna=True)),
+        "wrist_height_std_px": float(
+            metrics_df["wrist_height_diff_px"].std(skipna=True)
+        ),
+    }
+
+    component_scores = {
+        "shoulder_balance_score": score_from_abs_mean(
+            summary["mean_abs_shoulder_height_diff_px"],
+            thresholds=(10.0, 20.0, 35.0),
+            scores=(95, 80, 60, 35),
+        ),
+        "torso_posture_score": score_from_abs_mean(
+            summary["mean_abs_torso_tilt_deg"],
+            thresholds=(3.0, 6.0, 10.0),
+            scores=(95, 80, 60, 35),
+        ),
+        "elbow_balance_score": score_from_abs_mean(
+            summary["mean_abs_elbow_angle_diff_deg"],
+            thresholds=(8.0, 15.0, 25.0),
+            scores=(95, 80, 60, 35),
+        ),
+        "wrist_balance_score": score_from_abs_mean(
+            summary["mean_abs_wrist_height_diff_px"],
+            thresholds=(12.0, 25.0, 45.0),
+            scores=(95, 80, 60, 35),
+        ),
+        "stillness_score": np.nanmean(
+            [
+                score_from_std(
+                    summary["shoulder_height_std_px"],
+                    thresholds=(6.0, 12.0, 20.0),
+                    scores=(95, 80, 60, 35),
+                ),
+                score_from_std(
+                    summary["torso_tilt_std_deg"],
+                    thresholds=(1.5, 3.0, 5.0),
+                    scores=(95, 80, 60, 35),
+                ),
+                score_from_std(
+                    summary["wrist_height_std_px"],
+                    thresholds=(10.0, 20.0, 35.0),
+                    scores=(95, 80, 60, 35),
+                ),
+            ]
+        ),
+    }
+
+    weighted_scores = {
+        "shoulder_balance_score": 0.20,
+        "torso_posture_score": 0.25,
+        "elbow_balance_score": 0.20,
+        "wrist_balance_score": 0.15,
+        "stillness_score": 0.20,
+    }
+
+    overall_score = 0.0
+    total_weight = 0.0
+    for name, weight in weighted_scores.items():
+        value = component_scores[name]
+        if not pd.isna(value):
+            overall_score += float(value) * weight
+            total_weight += weight
+
+    overall_score = round(overall_score / total_weight, 1) if total_weight > 0 else np.nan
+    overall_grade = grade_from_score(overall_score) if not pd.isna(overall_score) else "N/A"
+
+    issue_candidates = [
+        ("shoulder_unlevel", component_scores["shoulder_balance_score"]),
+        ("torso_lean", component_scores["torso_posture_score"]),
+        ("elbow_line_bad", component_scores["elbow_balance_score"]),
+        ("wrist_height_unstable", component_scores["wrist_balance_score"]),
+        ("kai_unstable", component_scores["stillness_score"]),
+    ]
+    issue_candidates.sort(key=lambda item: item[1])
+
+    primary_issue = issue_candidates[0][0]
+    secondary_issue = issue_candidates[1][0]
+
+    issue_tags = [
+        name for name, score in issue_candidates if not pd.isna(score) and score < 75
+    ]
+
+    auto_comment = build_auto_comment(primary_issue, secondary_issue, component_scores)
+
+    return {
+        "overall_score": overall_score,
+        "overall_grade": overall_grade,
+        "primary_issue": primary_issue,
+        "secondary_issue": secondary_issue,
+        "issue_tags": issue_tags,
+        "auto_comment": auto_comment,
+        "component_scores": {
+            key: round(float(value), 1) for key, value in component_scores.items()
+        },
+        "summary_metrics": {key: round(float(value), 2) for key, value in summary.items()},
+    }
+
+
 def analyze_pose_csv(csv_path, output_dir, score_thr=0.3):
     csv_path = Path(csv_path)
     output_dir = Path(output_dir)
@@ -201,15 +394,21 @@ def analyze_pose_csv(csv_path, output_dir, score_thr=0.3):
 
     df = pd.read_csv(csv_path)
     metrics_df = analyze_keypoints_df(df, score_thr=score_thr)
+    evaluation_summary = evaluate_rule_based(metrics_df)
 
     metrics_path = output_dir / "metrics.csv"
+    evaluation_path = output_dir / "evaluation_summary.json"
     metrics_df.to_csv(metrics_path, index=False, encoding="utf-8")
     plot_metrics(metrics_df, plots_dir)
+    with evaluation_path.open("w", encoding="utf-8") as f:
+        json.dump(evaluation_summary, f, ensure_ascii=False, indent=2)
 
     return {
         "metrics_path": metrics_path,
+        "evaluation_path": evaluation_path,
         "plots_dir": plots_dir,
         "metrics_df": metrics_df,
+        "evaluation_summary": evaluation_summary,
     }
 
 
@@ -221,6 +420,7 @@ def main():
         score_thr=args.score_thr,
     )
     print(f"Saved metrics CSV: {result['metrics_path']}")
+    print(f"Saved evaluation summary: {result['evaluation_path']}")
     print(f"Saved plots directory: {result['plots_dir']}")
 
 
