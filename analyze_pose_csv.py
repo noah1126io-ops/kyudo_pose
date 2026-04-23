@@ -269,6 +269,17 @@ def build_auto_comment(primary_issue, secondary_issue, component_scores):
     return " ".join(parts)
 
 
+def make_issue_message(issue_name):
+    messages = {
+        "shoulder_unlevel": "左右の肩の高さ差が大きい",
+        "torso_lean": "胴体の傾きが大きい",
+        "elbow_line_bad": "左右の肘の収まりに差がある",
+        "wrist_height_unstable": "左右の手首高さの差が大きい",
+        "kai_unstable": "静止性が不足している",
+    }
+    return messages.get(issue_name, issue_name)
+
+
 def evaluate_rule_based(metrics_df):
     summary = {
         "mean_abs_shoulder_height_diff_px": float(
@@ -385,6 +396,326 @@ def evaluate_rule_based(metrics_df):
     }
 
 
+def evaluate_window(window_df):
+    summary = {
+        "mean_abs_shoulder_height_diff_px": float(
+            window_df["shoulder_height_diff_px"].abs().mean(skipna=True)
+        ),
+        "mean_abs_torso_tilt_deg": float(
+            window_df["torso_tilt_deg"].abs().mean(skipna=True)
+        ),
+        "mean_abs_elbow_angle_diff_deg": float(
+            window_df["elbow_angle_diff_deg"].abs().mean(skipna=True)
+        ),
+        "mean_abs_wrist_height_diff_px": float(
+            window_df["wrist_height_diff_px"].abs().mean(skipna=True)
+        ),
+        "shoulder_height_std_px": float(
+            window_df["shoulder_height_diff_px"].std(skipna=True)
+        ),
+        "torso_tilt_std_deg": float(window_df["torso_tilt_deg"].std(skipna=True)),
+        "wrist_height_std_px": float(window_df["wrist_height_diff_px"].std(skipna=True)),
+    }
+
+    component_scores = {
+        "shoulder_balance_score": score_from_abs_mean(
+            summary["mean_abs_shoulder_height_diff_px"], (10.0, 20.0, 35.0), (95, 80, 60, 35)
+        ),
+        "torso_posture_score": score_from_abs_mean(
+            summary["mean_abs_torso_tilt_deg"], (3.0, 6.0, 10.0), (95, 80, 60, 35)
+        ),
+        "elbow_balance_score": score_from_abs_mean(
+            summary["mean_abs_elbow_angle_diff_deg"], (8.0, 15.0, 25.0), (95, 80, 60, 35)
+        ),
+        "wrist_balance_score": score_from_abs_mean(
+            summary["mean_abs_wrist_height_diff_px"], (12.0, 25.0, 45.0), (95, 80, 60, 35)
+        ),
+        "stillness_score": np.nanmean(
+            [
+                score_from_std(summary["shoulder_height_std_px"], (6.0, 12.0, 20.0), (95, 80, 60, 35)),
+                score_from_std(summary["torso_tilt_std_deg"], (1.5, 3.0, 5.0), (95, 80, 60, 35)),
+                score_from_std(summary["wrist_height_std_px"], (10.0, 20.0, 35.0), (95, 80, 60, 35)),
+            ]
+        ),
+    }
+
+    issue_candidates = [
+        ("shoulder_unlevel", component_scores["shoulder_balance_score"]),
+        ("torso_lean", component_scores["torso_posture_score"]),
+        ("elbow_line_bad", component_scores["elbow_balance_score"]),
+        ("wrist_height_unstable", component_scores["wrist_balance_score"]),
+        ("kai_unstable", component_scores["stillness_score"]),
+    ]
+    issue_candidates.sort(key=lambda item: item[1])
+    return component_scores, issue_candidates
+
+
+def build_timeline_annotations(metrics_df, window_sec=0.75, step_sec=0.25, score_threshold=70):
+    valid_ts = metrics_df["timestamp_sec"].dropna()
+    if valid_ts.empty:
+        return {"timeline_windows": [], "issue_segments": []}
+
+    start_ts = float(valid_ts.min())
+    end_ts = float(valid_ts.max())
+    window_rows = []
+
+    current = start_ts
+    while current <= end_ts:
+        window_end = current + window_sec
+        window_df = metrics_df[
+            (metrics_df["timestamp_sec"] >= current) & (metrics_df["timestamp_sec"] < window_end)
+        ]
+        if not window_df.empty:
+            component_scores, issue_candidates = evaluate_window(window_df)
+            primary_issue, primary_score = issue_candidates[0]
+            row = {
+                "start_sec": round(current, 2),
+                "end_sec": round(window_end, 2),
+                "primary_issue": primary_issue,
+                "primary_score": round(float(primary_score), 1),
+            }
+            for key, value in component_scores.items():
+                row[key] = round(float(value), 1)
+            window_rows.append(row)
+        current += step_sec
+
+    segments = []
+    issue_order = [
+        "shoulder_unlevel",
+        "torso_lean",
+        "elbow_line_bad",
+        "wrist_height_unstable",
+        "kai_unstable",
+    ]
+    for issue_name in issue_order:
+        active_segment = None
+        for row in window_rows:
+            score_key = {
+                "shoulder_unlevel": "shoulder_balance_score",
+                "torso_lean": "torso_posture_score",
+                "elbow_line_bad": "elbow_balance_score",
+                "wrist_height_unstable": "wrist_balance_score",
+                "kai_unstable": "stillness_score",
+            }[issue_name]
+            if row[score_key] < score_threshold:
+                if active_segment is None:
+                    active_segment = {
+                        "issue": issue_name,
+                        "label": make_issue_message(issue_name),
+                        "start_sec": row["start_sec"],
+                        "end_sec": row["end_sec"],
+                        "worst_score": row[score_key],
+                    }
+                else:
+                    gap = row["start_sec"] - active_segment["end_sec"]
+                    if gap <= step_sec + 1e-6:
+                        active_segment["end_sec"] = row["end_sec"]
+                        active_segment["worst_score"] = min(active_segment["worst_score"], row[score_key])
+                    else:
+                        segments.append(active_segment)
+                        active_segment = {
+                            "issue": issue_name,
+                            "label": make_issue_message(issue_name),
+                            "start_sec": row["start_sec"],
+                            "end_sec": row["end_sec"],
+                            "worst_score": row[score_key],
+                        }
+            elif active_segment is not None:
+                segments.append(active_segment)
+                active_segment = None
+        if active_segment is not None:
+            segments.append(active_segment)
+
+    segments.sort(key=lambda x: (x["start_sec"], x["worst_score"]))
+    for segment in segments:
+        segment["start_sec"] = round(float(segment["start_sec"]), 2)
+        segment["end_sec"] = round(float(segment["end_sec"]), 2)
+        segment["worst_score"] = round(float(segment["worst_score"]), 1)
+        segment["comment"] = f"{segment['start_sec']:.2f}s-{segment['end_sec']:.2f}s: {segment['label']}"
+
+    return {"timeline_windows": window_rows, "issue_segments": segments}
+
+
+def find_longest_true_segment(mask, timestamps):
+    best = None
+    start_idx = None
+    for idx, active in enumerate(mask):
+        if active and start_idx is None:
+            start_idx = idx
+        elif not active and start_idx is not None:
+            segment = (start_idx, idx - 1)
+            if best is None or (segment[1] - segment[0]) > (best[1] - best[0]):
+                best = segment
+            start_idx = None
+    if start_idx is not None:
+        segment = (start_idx, len(mask) - 1)
+        if best is None or (segment[1] - segment[0]) > (best[1] - best[0]):
+            best = segment
+    return best
+
+
+def infer_phase_segments(metrics_df):
+    if metrics_df.empty or metrics_df["timestamp_sec"].dropna().empty:
+        return []
+
+    df = metrics_df.copy().reset_index(drop=True)
+    if len(df) < 2:
+        return []
+
+    ts = df["timestamp_sec"].astype(float)
+    total_start = float(ts.iloc[0])
+    total_end = float(ts.iloc[-1])
+    total_duration = max(total_end - total_start, 1e-6)
+
+    wrist_mean_y = df[["left_wrist_y_px", "right_wrist_y_px"]].mean(axis=1, skipna=True)
+    wrist_mean_y = wrist_mean_y.interpolate(limit_direction="both")
+    torso_tilt = df["torso_tilt_deg"].interpolate(limit_direction="both").fillna(0.0)
+    wrist_diff = df["wrist_height_diff_px"].interpolate(limit_direction="both").fillna(0.0)
+
+    dt = ts.diff().replace(0, np.nan).fillna(method="bfill").fillna(method="ffill").fillna(1 / 30)
+    motion = (
+        wrist_mean_y.diff().abs().fillna(0.0)
+        + 0.5 * wrist_diff.diff().abs().fillna(0.0)
+        + 3.0 * torso_tilt.diff().abs().fillna(0.0)
+    )
+    motion_smooth = motion.rolling(window=7, min_periods=1, center=True).mean()
+
+    upward_velocity = (-wrist_mean_y.diff() / dt).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    significant_up = upward_velocity > max(upward_velocity.quantile(0.8), 2.0)
+    uchiokoshi_start_idx = int(significant_up.idxmax()) if significant_up.any() else max(1, int(len(df) * 0.15))
+
+    valid_before_end = ts <= (total_start + total_duration * 0.75)
+    if valid_before_end.any():
+        candidate_series = wrist_mean_y.where(valid_before_end, np.nan)
+        uchiokoshi_end_idx = int(candidate_series.idxmin())
+    else:
+        uchiokoshi_end_idx = max(uchiokoshi_start_idx + 1, int(len(df) * 0.35))
+
+    kai_zone_mask = (ts >= (total_start + total_duration * 0.35)) & (
+        ts <= (total_start + total_duration * 0.9)
+    )
+    still_mask = (motion_smooth <= motion_smooth.quantile(0.35)) & kai_zone_mask
+    longest_still = find_longest_true_segment(still_mask.tolist(), ts.tolist())
+
+    if longest_still is None:
+        kai_start_idx = max(uchiokoshi_end_idx + 1, int(len(df) * 0.55))
+        kai_end_idx = max(kai_start_idx + 1, int(len(df) * 0.7))
+    else:
+        kai_start_idx, kai_end_idx = longest_still
+
+    if kai_start_idx <= uchiokoshi_end_idx:
+        kai_start_idx = min(len(df) - 2, uchiokoshi_end_idx + 1)
+    if kai_end_idx <= kai_start_idx:
+        kai_end_idx = min(len(df) - 1, kai_start_idx + 1)
+
+    hanare_start_idx = kai_end_idx
+    hanare_end_idx = min(len(df) - 1, hanare_start_idx + max(1, int(len(df) * 0.05)))
+    zanshin_start_idx = min(len(df) - 1, hanare_end_idx)
+
+    pre_uchi_duration = max(ts.iloc[uchiokoshi_start_idx] - total_start, total_duration * 0.12)
+    ashibumi_end = total_start + pre_uchi_duration / 3.0
+    dozukuri_end = total_start + 2.0 * pre_uchi_duration / 3.0
+    yugamae_end = total_start + pre_uchi_duration
+
+    def clip_time(value):
+        return round(float(min(max(value, total_start), total_end)), 2)
+
+    segments = [
+        {"phase_name": "ashibumi", "start_sec": clip_time(total_start), "end_sec": clip_time(ashibumi_end), "confidence": "low"},
+        {"phase_name": "dozukuri", "start_sec": clip_time(ashibumi_end), "end_sec": clip_time(dozukuri_end), "confidence": "low"},
+        {"phase_name": "yugamae", "start_sec": clip_time(dozukuri_end), "end_sec": clip_time(yugamae_end), "confidence": "low"},
+        {"phase_name": "uchiokoshi", "start_sec": clip_time(ts.iloc[uchiokoshi_start_idx]), "end_sec": clip_time(ts.iloc[uchiokoshi_end_idx]), "confidence": "medium"},
+        {"phase_name": "hikiwake", "start_sec": clip_time(ts.iloc[uchiokoshi_end_idx]), "end_sec": clip_time(ts.iloc[kai_start_idx]), "confidence": "medium"},
+        {"phase_name": "kai", "start_sec": clip_time(ts.iloc[kai_start_idx]), "end_sec": clip_time(ts.iloc[kai_end_idx]), "confidence": "medium"},
+        {"phase_name": "hanare", "start_sec": clip_time(ts.iloc[hanare_start_idx]), "end_sec": clip_time(ts.iloc[hanare_end_idx]), "confidence": "low"},
+        {"phase_name": "zanshin", "start_sec": clip_time(ts.iloc[zanshin_start_idx]), "end_sec": clip_time(total_end), "confidence": "medium"},
+    ]
+
+    cleaned_segments = []
+    previous_end = total_start
+    for segment in segments:
+        start_sec = max(segment["start_sec"], round(previous_end, 2))
+        end_sec = max(start_sec, segment["end_sec"])
+        cleaned_segments.append(
+            {
+                "phase_name": segment["phase_name"],
+                "start_sec": round(start_sec, 2),
+                "end_sec": round(end_sec, 2),
+                "duration_sec": round(max(end_sec - start_sec, 0.0), 2),
+                "confidence": segment["confidence"],
+            }
+        )
+        previous_end = end_sec
+
+    return cleaned_segments
+
+
+def compute_phase_score(segment_df, phase_name):
+    base_eval = evaluate_rule_based(segment_df)
+    component_scores = base_eval["component_scores"]
+
+    phase_weights = {
+        "ashibumi": {"torso_posture_score": 0.45, "shoulder_balance_score": 0.35, "stillness_score": 0.20},
+        "dozukuri": {"torso_posture_score": 0.50, "shoulder_balance_score": 0.30, "stillness_score": 0.20},
+        "yugamae": {"shoulder_balance_score": 0.30, "wrist_balance_score": 0.35, "stillness_score": 0.35},
+        "uchiokoshi": {"shoulder_balance_score": 0.30, "wrist_balance_score": 0.35, "torso_posture_score": 0.35},
+        "hikiwake": {"elbow_balance_score": 0.40, "torso_posture_score": 0.35, "wrist_balance_score": 0.25},
+        "kai": {"stillness_score": 0.45, "shoulder_balance_score": 0.20, "torso_posture_score": 0.20, "wrist_balance_score": 0.15},
+        "hanare": {"stillness_score": 0.30, "torso_posture_score": 0.40, "elbow_balance_score": 0.30},
+        "zanshin": {"stillness_score": 0.40, "torso_posture_score": 0.35, "shoulder_balance_score": 0.25},
+    }
+    weights = phase_weights[phase_name]
+
+    weighted_sum = 0.0
+    total_weight = 0.0
+    for key, weight in weights.items():
+        value = component_scores.get(key, np.nan)
+        if not pd.isna(value):
+            weighted_sum += float(value) * weight
+            total_weight += weight
+    phase_score = round(weighted_sum / total_weight, 1) if total_weight > 0 else np.nan
+
+    issue_candidates = [
+        ("shoulder_unlevel", component_scores["shoulder_balance_score"]),
+        ("torso_lean", component_scores["torso_posture_score"]),
+        ("elbow_line_bad", component_scores["elbow_balance_score"]),
+        ("wrist_height_unstable", component_scores["wrist_balance_score"]),
+        ("kai_unstable", component_scores["stillness_score"]),
+    ]
+    issue_candidates.sort(key=lambda item: item[1])
+    phase_issue = issue_candidates[0][0]
+
+    return phase_score, grade_from_score(phase_score), phase_issue
+
+
+def build_phase_evaluation(metrics_df):
+    phase_segments = infer_phase_segments(metrics_df)
+    phase_evaluations = []
+    for segment in phase_segments:
+        segment_df = metrics_df[
+            (metrics_df["timestamp_sec"] >= segment["start_sec"])
+            & (metrics_df["timestamp_sec"] <= segment["end_sec"])
+        ]
+        if segment_df.empty:
+            continue
+        phase_score, phase_grade, phase_issue = compute_phase_score(
+            segment_df, segment["phase_name"]
+        )
+        phase_evaluations.append(
+            {
+                "phase_name": segment["phase_name"],
+                "start_sec": segment["start_sec"],
+                "end_sec": segment["end_sec"],
+                "duration_sec": segment["duration_sec"],
+                "confidence": segment["confidence"],
+                "phase_score": phase_score,
+                "phase_grade": phase_grade,
+                "primary_issue": phase_issue,
+            }
+        )
+    return phase_evaluations
+
+
 def analyze_pose_csv(csv_path, output_dir, score_thr=0.3):
     csv_path = Path(csv_path)
     output_dir = Path(output_dir)
@@ -395,20 +726,32 @@ def analyze_pose_csv(csv_path, output_dir, score_thr=0.3):
     df = pd.read_csv(csv_path)
     metrics_df = analyze_keypoints_df(df, score_thr=score_thr)
     evaluation_summary = evaluate_rule_based(metrics_df)
+    evaluation_timeline = build_timeline_annotations(metrics_df)
+    phase_evaluations = build_phase_evaluation(metrics_df)
 
     metrics_path = output_dir / "metrics.csv"
     evaluation_path = output_dir / "evaluation_summary.json"
+    timeline_path = output_dir / "evaluation_timeline.json"
+    phase_path = output_dir / "phase_evaluation.json"
     metrics_df.to_csv(metrics_path, index=False, encoding="utf-8")
     plot_metrics(metrics_df, plots_dir)
     with evaluation_path.open("w", encoding="utf-8") as f:
         json.dump(evaluation_summary, f, ensure_ascii=False, indent=2)
+    with timeline_path.open("w", encoding="utf-8") as f:
+        json.dump(evaluation_timeline, f, ensure_ascii=False, indent=2)
+    with phase_path.open("w", encoding="utf-8") as f:
+        json.dump(phase_evaluations, f, ensure_ascii=False, indent=2)
 
     return {
         "metrics_path": metrics_path,
         "evaluation_path": evaluation_path,
+        "timeline_path": timeline_path,
+        "phase_path": phase_path,
         "plots_dir": plots_dir,
         "metrics_df": metrics_df,
         "evaluation_summary": evaluation_summary,
+        "evaluation_timeline": evaluation_timeline,
+        "phase_evaluations": phase_evaluations,
     }
 
 
@@ -421,6 +764,8 @@ def main():
     )
     print(f"Saved metrics CSV: {result['metrics_path']}")
     print(f"Saved evaluation summary: {result['evaluation_path']}")
+    print(f"Saved evaluation timeline: {result['timeline_path']}")
+    print(f"Saved phase evaluation: {result['phase_path']}")
     print(f"Saved plots directory: {result['plots_dir']}")
 
 
