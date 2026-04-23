@@ -1,0 +1,14 @@
+name: kyudo-pose
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - numpy
+  - pandas
+  - matplotlib
+  - opencv
+  - tqdm
+  - streamlit
+  - pip:
+      - openmim

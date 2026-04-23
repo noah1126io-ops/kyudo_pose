@@ -10,3 +10,17 @@ desktop.ini
 # Python cache
 __pycache__/
 *.pyc
+
+# Local environments
+.venv/
+venv/
+
+# Streamlit cache
+.streamlit/
+
+# Runtime data and analysis outputs
+data/uploads/
+data/input/*
+!data/input/.gitkeep
+outputs/*
+!outputs/.gitkeep
