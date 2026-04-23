@@ -56,6 +56,14 @@ def compute_torso_tilt(mid_shoulder, mid_hip):
     return float(np.degrees(np.arctan2(dx, -dy)))
 
 
+def estimate_hand_tip(elbow, wrist, extension_ratio=0.35):
+    forearm = wrist - elbow
+    forearm_length = np.linalg.norm(forearm)
+    if forearm_length == 0:
+        return None
+    return wrist + forearm * extension_ratio
+
+
 def analyze_keypoints_df(df, score_thr=0.3):
     metrics = []
 
@@ -89,6 +97,14 @@ def analyze_keypoints_df(df, score_thr=0.3):
         ):
             right_elbow_angle = compute_angle(right_shoulder, right_elbow, right_wrist)
 
+        left_hand_tip = None
+        if left_elbow is not None and left_wrist is not None:
+            left_hand_tip = estimate_hand_tip(left_elbow, left_wrist)
+
+        right_hand_tip = None
+        if right_elbow is not None and right_wrist is not None:
+            right_hand_tip = estimate_hand_tip(right_elbow, right_wrist)
+
         mid_shoulder = None
         if left_shoulder is not None and right_shoulder is not None:
             mid_shoulder = (left_shoulder + right_shoulder) / 2.0
@@ -116,6 +132,21 @@ def analyze_keypoints_df(df, score_thr=0.3):
                 "wrist_height_diff_px": np.nan
                 if left_wrist is None or right_wrist is None
                 else float(left_wrist[1] - right_wrist[1]),
+                "left_hand_tip_x_px": np.nan
+                if left_hand_tip is None
+                else float(left_hand_tip[0]),
+                "left_hand_tip_y_px": np.nan
+                if left_hand_tip is None
+                else float(left_hand_tip[1]),
+                "right_hand_tip_x_px": np.nan
+                if right_hand_tip is None
+                else float(right_hand_tip[0]),
+                "right_hand_tip_y_px": np.nan
+                if right_hand_tip is None
+                else float(right_hand_tip[1]),
+                "hand_tip_height_diff_px": np.nan
+                if left_hand_tip is None or right_hand_tip is None
+                else float(left_hand_tip[1] - right_hand_tip[1]),
                 "torso_tilt_deg": torso_tilt_deg,
             }
         )
@@ -166,14 +197,29 @@ def plot_metrics(metrics_df, plots_dir):
     save_plot(fig3, plots_dir / "wrist_heights_px.png")
 
     fig4, ax4 = plt.subplots(figsize=(10, 4))
-    ax4.plot(x, metrics_df["torso_tilt_deg"], color="tab:brown")
-    ax4.set_title("Torso Tilt")
+    ax4.plot(x, metrics_df["left_hand_tip_y_px"], label="Left hand tip", color="tab:pink")
+    ax4.plot(
+        x,
+        metrics_df["right_hand_tip_y_px"],
+        label="Right hand tip",
+        color="tab:cyan",
+    )
+    ax4.set_title("Estimated Hand Tip Height Time Series")
     ax4.set_xlabel("Time [s]")
-    ax4.set_ylabel("Tilt from vertical [deg]")
+    ax4.set_ylabel("y [px] (smaller = higher)")
     ax4.grid(True, alpha=0.3)
-    save_plot(fig4, plots_dir / "torso_tilt_deg.png")
+    ax4.legend()
+    save_plot(fig4, plots_dir / "hand_tip_heights_px.png")
 
-    fig5, axes = plt.subplots(4, 1, figsize=(12, 14), sharex=True)
+    fig5, ax5 = plt.subplots(figsize=(10, 4))
+    ax5.plot(x, metrics_df["torso_tilt_deg"], color="tab:brown")
+    ax5.set_title("Torso Tilt")
+    ax5.set_xlabel("Time [s]")
+    ax5.set_ylabel("Tilt from vertical [deg]")
+    ax5.grid(True, alpha=0.3)
+    save_plot(fig5, plots_dir / "torso_tilt_deg.png")
+
+    fig6, axes = plt.subplots(5, 1, figsize=(12, 17), sharex=True)
 
     axes[0].plot(x, metrics_df["shoulder_height_diff_px"], color="tab:blue")
     axes[0].set_ylabel("Shoulder diff [px]")
@@ -191,12 +237,18 @@ def plot_metrics(metrics_df, plots_dir):
     axes[2].grid(True, alpha=0.3)
     axes[2].legend()
 
-    axes[3].plot(x, metrics_df["torso_tilt_deg"], color="tab:brown")
-    axes[3].set_ylabel("Torso tilt [deg]")
-    axes[3].set_xlabel("Time [s]")
+    axes[3].plot(x, metrics_df["left_hand_tip_y_px"], label="Left", color="tab:pink")
+    axes[3].plot(x, metrics_df["right_hand_tip_y_px"], label="Right", color="tab:cyan")
+    axes[3].set_ylabel("Hand tip y [px]")
     axes[3].grid(True, alpha=0.3)
+    axes[3].legend()
 
-    save_plot(fig5, plots_dir / "combined_metrics.png")
+    axes[4].plot(x, metrics_df["torso_tilt_deg"], color="tab:brown")
+    axes[4].set_ylabel("Torso tilt [deg]")
+    axes[4].set_xlabel("Time [s]")
+    axes[4].grid(True, alpha=0.3)
+
+    save_plot(fig6, plots_dir / "combined_metrics.png")
 
 
 def score_from_abs_mean(value, thresholds, scores):

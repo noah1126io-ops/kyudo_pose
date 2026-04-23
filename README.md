@@ -12,6 +12,7 @@ Windows で RTMPose / MMPose を使い、弓道動画をアップロードして
   - 左右肩の高さ差
   - 肩-肘-手首角度
   - 手首の高さ時系列
+  - 推定した手先点の高さ時系列
   - 胴体の傾き
 - Streamlit の画面から動画アップロードと分析実行
 
@@ -152,6 +153,7 @@ python run_pose_video.py --input data/input/sample.mp4 --output-dir outputs/samp
 - 単一人物前提なので `det_model='whole_image'` を使用
   - フレーム全体を人物領域として扱います。
 - キーポイント形式は COCO 17 点前提です。
+- 手先点は現時点では COCO 17 点に含まれないため、肘-手首ベクトルを手先方向に延長した推定点として扱います。
 
 ## 指標の意味
 
@@ -180,4 +182,3 @@ python run_pose_video.py --input data/input/sample.mp4 --output-dir outputs/samp
 4. 弓道フェーズ検出
 5. Streamlit 上で複数グラフの比較表示
 6. 処理結果を ZIP で一括ダウンロード
-

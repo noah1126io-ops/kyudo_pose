@@ -302,12 +302,15 @@ def main():
             "shoulder_height_diff_px.png",
             "elbow_angles_deg.png",
             "wrist_heights_px.png",
+            "hand_tip_heights_px.png",
             "torso_tilt_deg.png",
         ]
         for plot_name in plot_files:
             plot_path = analysis_result["plots_dir"] / plot_name
             if plot_path.exists():
                 st.image(str(plot_path), caption=plot_name, use_container_width=True)
+
+        st.caption("手先点は現時点では手首そのものではなく、肘-手首ベクトルを前方へ延長した推定点です。")
 
     with st.expander("開発者向け情報"):
         st.subheader("ダウンロード")
